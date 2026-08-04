@@ -73,37 +73,39 @@ export const handler = async (event) => {
     const qs = event?.queryStringParameters ?? {};
     const limit = qs.limit ? Number(qs.limit) : 50;
 
+    // Consulta por el GSI de dueño: el aislamiento lo impone la clave de la
+    // consulta (owner_uid), no un filtro en memoria. Antes se leían los
+    // dispositivos de TODOS los usuarios y luego se filtraba, lo que además
+    // rompía la paginación (Limit se aplicaba antes del filtro).
     const result = await ddb.send(
       new QueryCommand({
         TableName: TABLE_NAME,
-        KeyConditionExpression: "#pk = :pk",
+        IndexName: "owner-index",
+        KeyConditionExpression: "#owner = :owner",
+        FilterExpression: "#type = :type",
         ExpressionAttributeNames: {
-          "#pk": "type",
+          "#owner": "owner_uid",
+          "#type": "type",
         },
         ExpressionAttributeValues: {
-          ":pk": "device",
+          ":owner": ownerUid,
+          ":type": "device",
         },
         ScanIndexForward: false,
         Limit: limit,
       })
     );
 
-    const filteredItems = (result.Items ?? []).filter(
-      (item) => item.owner_uid === ownerUid
-    );
-
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
-        items: filteredItems,
+        items: result.Items ?? [],
         lastEvaluatedKey: result.LastEvaluatedKey ?? null,
       }),
     };
   } catch (err) {
-    const isAuthError =
-      err?.code?.startsWith?.("auth/") ||
-      err?.message?.toLowerCase?.().includes("token");
+    const isAuthError = err?.code?.startsWith?.("auth/") === true;
 
     return {
       statusCode: isAuthError ? 401 : 500,
