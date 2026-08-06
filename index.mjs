@@ -114,38 +114,44 @@ export const handler = async (event) => {
     const decodedToken = await admin.auth().verifyIdToken(token);
     const ownerUid = decodedToken.uid;
 
-    const qs = event?.queryStringParameters ?? {};
-    const limit = qs.limit ? Number(qs.limit) : 50;
-
-    // Consulta por el GSI de dueño: el aislamiento lo impone la clave de la
-    // consulta (owner_uid), no un filtro en memoria. Antes se leían los
-    // dispositivos de TODOS los usuarios y luego se filtraba, lo que además
-    // rompía la paginación (Limit se aplicaba antes del filtro).
-    const result = await ddb.send(
-      new QueryCommand({
-        TableName: TABLE_NAME,
-        IndexName: "owner-index",
-        KeyConditionExpression: "#owner = :owner",
-        FilterExpression: "#type = :type",
-        ExpressionAttributeNames: {
-          "#owner": "owner_uid",
-          "#type": "type",
-        },
-        ExpressionAttributeValues: {
-          ":owner": ownerUid,
-          ":type": "device",
-        },
-        ScanIndexForward: false,
-        Limit: limit,
-      })
-    );
+    // Consulta por el GSI de dueño (aislamiento por owner_uid). CLAVE: en DynamoDB
+    // el Limit se aplica ANTES del FilterExpression, así que un Limit chico sobre una
+    // partición dominada por EVENTOS puede devolver 0 dispositivos aunque existan
+    // (un usuario con muchos eventos veía "desaparecer" sus cámaras). Los dispositivos
+    // son pocos: paginamos la partición completa del dueño acumulando SOLO type=device.
+    let items = [];
+    let ExclusiveStartKey;
+    let pages = 0;
+    do {
+      const result = await ddb.send(
+        new QueryCommand({
+          TableName: TABLE_NAME,
+          IndexName: "owner-index",
+          KeyConditionExpression: "#owner = :owner",
+          FilterExpression: "#type = :type",
+          ExpressionAttributeNames: {
+            "#owner": "owner_uid",
+            "#type": "type",
+          },
+          ExpressionAttributeValues: {
+            ":owner": ownerUid,
+            ":type": "device",
+          },
+          ScanIndexForward: false,
+          ExclusiveStartKey,
+        })
+      );
+      items.push(...(result.Items ?? []));
+      ExclusiveStartKey = result.LastEvaluatedKey;
+      pages += 1;
+    } while (ExclusiveStartKey && pages < 50); // tope de seguridad ante particiones enormes
 
     return {
       statusCode: 200,
       headers,
       body: JSON.stringify({
-        items: result.Items ?? [],
-        lastEvaluatedKey: result.LastEvaluatedKey ?? null,
+        items,
+        lastEvaluatedKey: null,
       }),
     };
   } catch (err) {
